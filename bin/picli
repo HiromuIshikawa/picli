@@ -1,0 +1,267 @@
+#!/usr/bin/env ruby
+
+require "rubygems"
+
+gemfile = File.expand_path("../../Gemfile", __FILE__)
+
+if File.exists?(gemfile + ".lock")
+  ENV["BUNDLE_GEMFILE"] = gemfile
+  require "bundler/setup"
+end
+
+require "clian"
+Clian::Cli.bundler_rbenv_setup(__FILE__)
+
+# https://github.com/morgoth/picasa
+require "picasa"
+require "picli"
+require "pp"
+
+module Picasa
+  module API
+    class Album < Base
+      def show_recent(options = {})
+        options = options.merge(:kind => 'photo')
+        path = "/data/feed/api/user/#{user_id}"
+        response = Connection.new.get(path: path, query: options, headers: auth_header)
+
+        Presenter::Album.new(response.parsed_response["feed"])
+      end
+    end
+  end
+end
+
+Encoding.default_external="UTF-8"
+
+class PicliCLI < Clian::Cli
+  package_name 'PICLI'
+
+  ################################################################
+  # Command: scan
+  ################################################################
+  desc "debug", "Scan JSON"
+
+  def debug
+    # https://developers.google.com/picasa-web/docs/2.0/developers_guide_protocol
+    # Listing photos recently uploaded
+    # GET https://picasaweb.google.com/data/feed/api/user/userID?kind=photo&max-results=10
+
+    album_list = @client.album.list('kind' => "photo", 'max-results' => 1)
+    puts "#{album_list.parsed_body}"
+    album_list.entries.each do |a|
+      puts a.title
+      a.entries.each do |p|
+        t = p.media.thumbnails[0]
+        puts "<a href=\"#{t.url}\">#{p.title} #{t.width}x#{t.height}</a>"
+      end
+    end
+  end
+
+  ################################################################
+  # Command: albums
+  ################################################################
+  desc "albums", "Scan albums"
+
+  def albums
+    album_list = @client.album.list
+    album_list.entries.each do |a|
+      dump_album(a)
+    end
+  end
+
+  ################################################################
+  # Command: photos in ALBUM
+  ################################################################
+  desc "photos ALBUM_ID", "scan photos in ALBUM_ID"
+
+  def photos(album_id)
+    photos = @client.album.show(album_id)
+    photos.entries.each do |p|
+      dump_photo(p)
+    end
+  end
+
+  ################################################################
+  # Command: photos in ALBUM
+  ################################################################
+  desc "html", "Dump photos for each album in HTML format"
+
+  def html
+    puts "<html>"
+    album_list = @client.album.list
+    album_list.entries.each do |a|
+      puts "<h2>#{a.title}</h2>"
+      photos = @client.album.show(a.id, 'thumbsize' => "104c", 'imgmax' => '1600')
+      photos.entries.each do |p|
+        t = p.media.thumbnails[0]
+        title = p.title.to_s.sub(/\.[^.]*$/, '')
+        puts "<a href=\"#{p.content.src}\" title=\"#{title}\"/><img src=\"#{t.url}\" /></a>"
+      end
+    end
+    puts "</html>"
+    # => Picasa::Presenter::AlbumList
+    # client.album.show("album_id")
+    # => Picasa::Presenter::Album
+    # client.photo.create("album_id", file_path: "path/to/my-photo.png")
+    # => Picasa::Presenter::Photo
+  end
+
+  ################################################################
+  # Command: photos in ALBUM
+  ################################################################
+  desc "upload FILE...", "Upload picture files."
+
+  def upload(album_id, *files)
+    files.each do |file|
+      puts file
+      # File.open(file) do |f|
+      #   puts f.name
+      #   puts f.binary
+      #   puts f.content_type
+      # end
+      photo = @client.photo.create(album_id,
+                                   file_path: file,
+                                   title:     File.basename(file))
+      pp photo.id
+    end
+  end
+
+
+  ################################################################
+  # Command: show
+  ################################################################
+  desc "show ALBUM_ID", "Show article found by ALBUM_ID"
+
+  def show(album_id)
+    album = @client.album.show(album_id)
+    album.photos.each do |p|
+      puts ">>>>>>>>>>>>>>>>>>>>>"
+      puts "title               #{p.title}"
+      puts "id                  #{p.id}"
+      puts "album_id            #{p.album_id}"
+      puts "checksum            #{p.checksum}"
+      puts "width,height,size   #{p.width},#{p.height},#{p.size}"
+      puts "latitude,longitude  #{p.latitude},#{p.longitude}"
+      puts "published           #{p.published}"
+      puts "timestamp           #{p.timestamp} (#{Time.at(p.timestamp.to_i)})"
+      puts "summary             #{p.summary}"
+
+      puts "access              #{p.access}"
+      puts "license             #{p.license}"
+      puts "comment_count       #{p.comment_count}"
+      puts "commenting_enabled  #{p.commenting_enabled}"
+      puts "etag                #{p.etag}"
+      puts "image_version       #{p.image_version}"
+      p.links.each do |link|
+        puts "  href              #{link.href}"
+      end
+      puts "media               #{p.media}"
+      p.media.thumbnails.each do |t|
+        puts "THUMBNAIL height,width = #{t.height},#{t.width}"
+        puts "THUMBNAIL url = #{t.url}"
+      end
+      puts "updated             #{p.updated}"
+      puts "video_status        #{p.video_status}"
+      puts "exif                #{p.exif}"
+      puts "content             #{p.content}"
+    end
+    puts "<<<<<<<<<<<<<<<<<<<<"
+  end
+
+  ################################################################
+  # Command: recent
+  ################################################################
+  desc "recent", "Show recent updated photos"
+
+  expand_named_option :page
+
+  def recent
+    page = (options[:page] || 1).to_i
+    page_size = 100
+    start_index = (page.to_i - 1) * page_size + 1
+    album = @client.album.show_recent('thumbsize' => "128c", 'start-index' => start_index, 'max-results' => page_size)
+
+    album.photos.entries.each do |p|
+      dump_photo(p)
+    end
+  end
+
+  ################################################################
+  # Command: thumbnails
+  ################################################################
+  desc "thumbnails [ALBUM_ID]", "Show thumbnails in ALBUM_ID"
+
+  expand_named_option :page
+
+  def thumbnails(album_id = nil)
+    page = (options[:page] || 1).to_i
+    page_size = 100
+    start_index = (page.to_i - 1) * page_size + 1
+
+    if album_id
+      album = @client.album.show(album_id, 'thumbsize' => "128c", 'start-index' => start_index, 'max-results' => page_size)
+    else
+      album = @client.album.show_recent('thumbsize' => "128c", 'start-index' => start_index, 'max-results' => page_size)
+    end
+
+    album.photos.each_with_index do |p,i|
+      # p.links.each do |link|
+      #   puts "photo.href #{link.href}"
+      #   puts "photo.rel  #{link.rel}"
+      #   puts "photo.type #{link.href}"
+      # end
+      p.media.thumbnails.each do |t|
+        puts "<img src=\"#{t.url}\" />(#{start_index + i}) #{p.title} #{t.width}x#{t.height}<br/>"
+      end
+    end
+  end
+
+  ################################################################
+  # private
+
+  private
+
+  def setup_global_options
+    @config = Picli::Config.create_from_file(options[:config] ||
+                                             Picli::Config.default_path('picli'))
+
+    config = @config.general
+    @authorizer = Clian::Authorizer.new(config.client_id,
+                                         config.client_secret,
+                                         "https://picasaweb.google.com/data/",
+                                         config.token_store_path)
+
+    credentials = @authorizer.credentials(config.default_user) ||
+                  @authorizer.auth_interactively(config.default_user)
+
+    credentials.refresh! if credentials.expired?
+
+    @client = ::Picasa::Client.new(user_id:      config.default_user,
+                                   access_token: credentials.access_token)
+  end
+
+  def dump_photo(p)
+    puts "-----------------------"
+    puts "Title: #{p.title}"
+    puts "Content: #{p.content.src}"
+    p.media.thumbnails.each do |t|
+      puts "Thumbnail: #{t.url}"
+    end
+  end
+
+  def dump_album(a)
+    puts "---------------------------"
+    puts "Id: #{a.id}"
+    puts "Title: #{a.title}"
+    puts "Name: #{a.name}"
+    puts "Nickname: #{a.nickname}"
+    puts "Summary: #{a.summary}"
+    puts "NumPhotos: #{a.numphotos}"
+    puts "Location: #{a.location}"
+    puts "TimeStamp: #{a.timestamp}"
+    puts "Updated: #{a.updated}"
+    puts "Published: #{a.published}"
+  end
+end
+
+PicliCLI.start(ARGV)
